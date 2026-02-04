@@ -1,384 +1,424 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:geolocator/geolocator.dart';
 import 'package:battery_plus/battery_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:permission_handler/permission_handler.dart';
+// Eliminado permission_handler (usaremos Geolocator)
+import 'package:flutter_background_service/flutter_background_service.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+// Eliminado el import redundante de android
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await initializeService();
   runApp(const NavControlApp());
 }
 
+// --- CONFIGURACIÓN DEL SERVICIO ---
+Future<void> initializeService() async {
+  final service = FlutterBackgroundService();
+
+  const AndroidNotificationChannel channel = AndroidNotificationChannel(
+    'navcontrol_tracker', 
+    'NavControl Service', 
+    description: 'Rastreo de ubicación activo',
+    importance: Importance.low, 
+  );
+
+  final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
+
+  if (Platform.isAndroid) {
+    await flutterLocalNotificationsPlugin.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()?.createNotificationChannel(channel);
+  }
+
+  await service.configure(
+    androidConfiguration: AndroidConfiguration(
+      onStart: onStart,
+      autoStart: false, 
+      isForegroundMode: true,
+      notificationChannelId: 'navcontrol_tracker',
+      initialNotificationTitle: 'NavControl',
+      initialNotificationContent: 'Servicio iniciado...',
+      foregroundServiceNotificationId: 888,
+    ),
+    iosConfiguration: IosConfiguration(
+      autoStart: false,
+      onForeground: onStart,
+      onBackground: onIosBackground,
+    ),
+  );
+}
+
+@pragma('vm:entry-point')
+Future<bool> onIosBackground(ServiceInstance service) async {
+  WidgetsFlutterBinding.ensureInitialized();
+  DartPluginRegistrant.ensureInitialized();
+  return true;
+}
+
+// --- LÓGICA EN SEGUNDO PLANO ---
+@pragma('vm:entry-point')
+void onStart(ServiceInstance service) async {
+  DartPluginRegistrant.ensureInitialized();
+
+  // Configuración para Android
+  if (service is AndroidServiceInstance) {
+    service.on('setAsForeground').listen((event) {
+      service.setAsForegroundService();
+    });
+    service.on('setAsBackground').listen((event) {
+      service.setAsBackgroundService();
+    });
+  }
+
+  service.on('stopService').listen((event) {
+    service.stopSelf();
+  });
+
+  // Bucle infinito
+  Timer.periodic(const Duration(seconds: 30), (timer) async {
+    final prefs = await SharedPreferences.getInstance();
+    final String? apiUrl = prefs.getString('api_url');
+    final String? token = prefs.getString('api_token');
+    final int? internalId = prefs.getInt('vehiculo_internal_id');
+
+    if (apiUrl == null || token == null || internalId == null) {
+      return; 
+    }
+
+    // Actualizar notificación en Android
+    if (service is AndroidServiceInstance) {
+      service.setForegroundNotificationInfo(
+        title: "NavControl Activo",
+        content: "Último envío: ${DateTime.now().hour}:${DateTime.now().minute.toString().padLeft(2, '0')}",
+      );
+    }
+
+    try {
+      Position position = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
+      int batteryLevel = await Battery().batteryLevel;
+
+      // 1. Enviar Historial
+      await http.post(
+        Uri.parse('$apiUrl/historial/'),
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": "Token $token"
+        },
+        body: json.encode({
+          "vehiculo": internalId,
+          "latitud": position.latitude,
+          "longitud": position.longitude,
+          "velocidad": (position.speed * 3.6).toInt(),
+          "bateria": batteryLevel
+        }),
+      );
+
+      // 2. Actualizar Ubicación Flota
+      await http.patch(
+         Uri.parse('$apiUrl/flota/$internalId/'),
+         headers: { "Content-Type": "application/json", "Authorization": "Token $token" },
+         body: json.encode({ "ultima_posicion": {"type": "Point", "coordinates": [position.longitude, position.latitude]} })
+      );
+
+      debugPrint("📡 [Background] OK ID: $internalId");
+      
+      // Enviar datos a la UI
+      service.invoke(
+        'update',
+        {
+          "last_update": DateTime.now().toIso8601String(),
+          "bat": batteryLevel,
+        },
+      );
+
+    } catch (e) {
+      debugPrint("❌ [Background] Error: $e");
+    }
+  });
+}
+
+
+// --- INTERFAZ UI ---
 class NavControlApp extends StatelessWidget {
   const NavControlApp({super.key});
-
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'NavControl Driver',
       theme: ThemeData(primarySwatch: Colors.blue, useMaterial3: true),
-      home: const MainScreen(),
+      home: const SplashScreen(),
     );
   }
 }
 
-class MainScreen extends StatefulWidget {
-  const MainScreen({super.key});
-
+// Pantalla de Carga
+class SplashScreen extends StatefulWidget {
+  const SplashScreen({super.key});
   @override
-  State<MainScreen> createState() => _MainScreenState();
+  State<SplashScreen> createState() => _SplashScreenState();
 }
-
-class _MainScreenState extends State<MainScreen> {
-  // --- CONFIGURACIÓN ---
-  final TextEditingController _apiUrlController = TextEditingController();
-  final TextEditingController _tokenController = TextEditingController(); // NUEVO: Token editable
-  final TextEditingController _identifierController = TextEditingController();
-  
-  // --- ESTADO ---
-  bool _isConfigured = false;
-  bool _isTracking = true;
-  String _statusMessage = "Esperando configuración...";
-  
-  // --- DATOS VEHÍCULO ---
-  int? _internalId; 
-  String _nombreVehiculo = "-";
-  String _matricula = "-";
-  String _codigoDesbloqueoReal = ""; 
-  
-  Timer? _timer;
-  final Battery _battery = Battery();
-
+class _SplashScreenState extends State<SplashScreen> {
   @override
   void initState() {
     super.initState();
-    _loadSettings();
-    _requestPermissions();
+    _checkPermissionsAndSession();
   }
 
-  // 1. CARGAR CONFIGURACIÓN
-  Future<void> _loadSettings() async {
-    final prefs = await SharedPreferences.getInstance();
-    setState(() {
-      _apiUrlController.text = prefs.getString('api_url') ?? 'https://navcontrol.automaworks.es/api';
-      // Token por defecto vacío o el que tenías para facilitar pruebas
-      _tokenController.text = prefs.getString('api_token') ?? 'e588558833e4365f809cb273a587e962b054c9e7';
-      _identifierController.text = prefs.getString('vehiculo_identifier') ?? '';
-      
-      if (_identifierController.text.isNotEmpty && _tokenController.text.isNotEmpty) {
-        _fetchVehicleInfo(); 
-      }
-    });
-  }
-
-  Future<void> _requestPermissions() async {
-    await [Permission.location].request();
-  }
-
-  // 2. GUARDAR CONFIGURACIÓN
-  Future<void> _saveSettings() async {
-    // Validamos conexión antes de guardar
-    await _fetchVehicleInfo();
+  Future<void> _checkPermissionsAndSession() async {
+    // 1. Pedimos permisos usando Geolocator directamente (sin permission_handler)
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
     
-    if (_internalId != null) {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('api_url', _apiUrlController.text);
-      await prefs.setString('api_token', _tokenController.text); // Guardamos el token
-      await prefs.setString('vehiculo_identifier', _identifierController.text);
-    }
-  }
-
-  void _startTrackingLoop() {
-    _timer?.cancel();
-    _timer = Timer.periodic(const Duration(seconds: 30), (timer) {
-      if (_isTracking && _isConfigured && _internalId != null) {
-        _sendTelemetry();
-      }
-    });
-  }
-
-  // 3. BUSCAR VEHÍCULO (Usando Token dinámico)
-  Future<void> _fetchVehicleInfo() async {
-    try {
-      setState(() => _statusMessage = "Conectando...");
-      
-      final url = '${_apiUrlController.text}/flota/?identificador=${_identifierController.text}';
-      
-      final response = await http.get(
-        Uri.parse(url),
-        headers: {
-          "Content-Type": "application/json", 
-          "Authorization": "Token ${_tokenController.text}" // USA EL TOKEN DEL CAMPO DE TEXTO
-        },
+    // 2. Comprobamos sesión
+    final prefs = await SharedPreferences.getInstance();
+    final hasConfig = prefs.containsKey('vehiculo_internal_id');
+    
+    if (mounted) {
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(builder: (_) => hasConfig ? const DashboardScreen() : const ConfigScreen()),
       );
-
-      if (response.statusCode == 200) {
-        final List<dynamic> results = json.decode(utf8.decode(response.bodyBytes));
-        
-        if (results.isNotEmpty) {
-          final data = results[0]; 
-          
-          setState(() {
-            _internalId = data['id']; 
-            _nombreVehiculo = data['nombre'];
-            _matricula = data['matricula'];
-            _codigoDesbloqueoReal = data['codigo_seguridad'] ?? "0000"; 
-            _isConfigured = true;
-            _statusMessage = "Conectado: $_nombreVehiculo";
-          });
-          
-          _startTrackingLoop();
-          
-        } else {
-           setState(() {
-             _statusMessage = "❌ ID no encontrado: ${_identifierController.text}";
-             _isConfigured = false;
-           });
-        }
-      } else {
-        setState(() => _statusMessage = "Error API (${response.statusCode}): Revise Token/URL");
-      }
-    } catch (e) {
-      debugPrint("Error: $e");
-      setState(() => _statusMessage = "Error de Conexión");
     }
-  }
-
-  // 4. ENVIAR DATOS (Usando Token dinámico)
-  Future<void> _sendTelemetry() async {
-    if (_internalId == null) return;
-
-    try {
-      Position position = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
-      int batteryLevel = await _battery.batteryLevel;
-
-      final urlHistorial = '${_apiUrlController.text}/historial/';
-      final payload = {
-        "vehiculo": _internalId,
-        "latitud": position.latitude,
-        "longitud": position.longitude,
-        "velocidad": position.speed.toInt() * 3.6,
-        "bateria": batteryLevel
-      };
-
-      final response = await http.post(
-        Uri.parse(urlHistorial),
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": "Token ${_tokenController.text}" // TOKEN DINÁMICO
-        },
-        body: json.encode(payload),
-      );
-      
-      await http.patch(
-         Uri.parse('${_apiUrlController.text}/flota/$_internalId/'),
-         headers: {
-          "Content-Type": "application/json",
-          "Authorization": "Token ${_tokenController.text}" // TOKEN DINÁMICO
-         },
-         body: json.encode({
-           "ultima_posicion": {"type": "Point", "coordinates": [position.longitude, position.latitude]}
-         })
-      );
-
-      debugPrint("📡 Telemetría enviada (ID: $_internalId): ${response.statusCode}");
-      
-      setState(() {
-         _statusMessage = "Último envío: ${TimeOfDay.now().format(context)} | Bat: $batteryLevel%";
-      });
-
-    } catch (e) {
-      debugPrint("Error enviando: $e");
-    }
-  }
-
-  void _toggleTracking(bool value) async {
-    if (value == false) {
-      _showUnlockDialog();
-    } else {
-      setState(() => _isTracking = true);
-      _statusMessage = "Seguimiento REACTIVADO";
-    }
-  }
-
-  Future<void> _showUnlockDialog() async {
-    String inputCode = "";
-    return showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          title: const Text('🔐 Desactivar Localización'),
-          content: SingleChildScrollView(
-            child: ListBody(
-              children: <Widget>[
-                const Text('Introduce el código de seguridad.'),
-                const SizedBox(height: 10),
-                TextField(
-                  onChanged: (value) => inputCode = value,
-                  decoration: const InputDecoration(border: OutlineInputBorder(), hintText: "Código"),
-                ),
-              ],
-            ),
-          ),
-          actions: <Widget>[
-            TextButton(
-              child: const Text('Cancelar'),
-              onPressed: () => Navigator.of(context).pop(),
-            ),
-            FilledButton(
-              child: const Text('Verificar'),
-              onPressed: () {
-                if (inputCode == _codigoDesbloqueoReal) {
-                   setState(() {
-                     _isTracking = false;
-                     _statusMessage = "⚠️ SEGUIMIENTO PAUSADO";
-                   });
-                   Navigator.of(context).pop();
-                   ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Desactivado")));
-                } else {
-                   ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: Colors.red, content: Text("Código Incorrecto")));
-                }
-              },
-            ),
-          ],
-        );
-      },
-    );
   }
 
   @override
   Widget build(BuildContext context) {
-    if (!_isConfigured) {
-      // --- PANTALLA DE CONFIGURACIÓN ---
-      return Scaffold(
-        appBar: AppBar(title: const Text("Configuración del Terminal")),
-        body: Padding(
-          padding: const EdgeInsets.all(20.0),
-          child: SingleChildScrollView( // Para evitar overflow con el teclado
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                const Icon(Icons.phonelink_setup, size: 80, color: Colors.blue),
-                const SizedBox(height: 20),
-                
-                TextField(
-                  controller: _apiUrlController,
-                  decoration: const InputDecoration(
-                    labelText: "URL del Servidor", 
-                    hintText: "https://midominio.com/api",
-                    border: OutlineInputBorder()
-                  ),
-                ),
-                const SizedBox(height: 10),
-                
-                TextField(
-                  controller: _tokenController,
-                  obscureText: true, // Ocultar el token por seguridad visual
-                  decoration: const InputDecoration(
-                    labelText: "Token de API", 
-                    border: OutlineInputBorder(),
-                    helperText: "Token proporcionado por el administrador"
-                  ),
-                ),
-                const SizedBox(height: 10),
-                
-                TextField(
-                  controller: _identifierController,
-                  decoration: const InputDecoration(
-                    labelText: "ID Dispositivo (Ej: TRUCK-01)", 
-                    border: OutlineInputBorder(),
-                    helperText: "Identificador único del vehículo"
-                  ),
-                ),
-                const SizedBox(height: 20),
-                
-                ElevatedButton.icon(
-                  onPressed: _saveSettings,
-                  icon: const Icon(Icons.save),
-                  label: const Text("Guardar y Conectar"),
-                  style: ElevatedButton.styleFrom(
-                    minimumSize: const Size(double.infinity, 50),
-                  ),
-                )
-              ],
-            ),
+    return const Scaffold(body: Center(child: CircularProgressIndicator()));
+  }
+}
+
+// Pantalla Configuración
+class ConfigScreen extends StatefulWidget {
+  const ConfigScreen({super.key});
+  @override
+  State<ConfigScreen> createState() => _ConfigScreenState();
+}
+
+class _ConfigScreenState extends State<ConfigScreen> {
+  final _apiUrlCtrl = TextEditingController(text: "https://navcontrol.automaworks.es/api");
+  final _tokenCtrl = TextEditingController(text: "e588558833e4365f809cb273a587e962b054c9e7");
+  final _idCtrl = TextEditingController();
+  bool _isLoading = false;
+
+  Future<void> _saveAndConnect() async {
+    setState(() => _isLoading = true);
+    try {
+      final url = '${_apiUrlCtrl.text}/flota/?identificador=${_idCtrl.text}';
+      final response = await http.get(Uri.parse(url), headers: {
+        "Content-Type": "application/json", "Authorization": "Token ${_tokenCtrl.text}"
+      });
+
+      if (response.statusCode == 200) {
+        final List<dynamic> results = json.decode(utf8.decode(response.bodyBytes));
+        if (results.isNotEmpty) {
+          final data = results[0];
+          
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString('api_url', _apiUrlCtrl.text);
+          await prefs.setString('api_token', _tokenCtrl.text);
+          await prefs.setString('vehiculo_identifier', _idCtrl.text);
+          await prefs.setInt('vehiculo_internal_id', data['id']);
+          await prefs.setString('vehiculo_nombre', data['nombre']);
+          await prefs.setString('vehiculo_matricula', data['matricula']);
+          await prefs.setString('vehiculo_codigo', data['codigo_seguridad'] ?? "0000");
+
+          // Arrancar Servicio
+          final service = FlutterBackgroundService();
+          await service.startService();
+
+          if (mounted) {
+            Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => const DashboardScreen()));
+          }
+        } else {
+          _showSnack("ID no encontrado");
+        }
+      } else {
+        _showSnack("Error API: ${response.statusCode}");
+      }
+    } catch (e) {
+      _showSnack("Error conexión: $e");
+    } finally {
+      setState(() => _isLoading = false);
+    }
+  }
+
+  void _showSnack(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg), backgroundColor: Colors.red));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text("Configuración")),
+      body: Padding(
+        padding: const EdgeInsets.all(20),
+        child: SingleChildScrollView(
+          child: Column(
+            children: [
+              const Icon(Icons.settings_remote, size: 80, color: Colors.blue),
+              const SizedBox(height: 20),
+              TextField(controller: _apiUrlCtrl, decoration: const InputDecoration(labelText: "URL API", border: OutlineInputBorder())),
+              const SizedBox(height: 10),
+              TextField(controller: _tokenCtrl, obscureText: true, decoration: const InputDecoration(labelText: "Token", border: OutlineInputBorder())),
+              const SizedBox(height: 10),
+              TextField(controller: _idCtrl, decoration: const InputDecoration(labelText: "ID Dispositivo", border: OutlineInputBorder())),
+              const SizedBox(height: 20),
+              _isLoading ? const CircularProgressIndicator() : ElevatedButton(onPressed: _saveAndConnect, child: const Text("Guardar y Conectar"))
+            ],
           ),
         ),
-      );
-    }
-
-    // --- PANTALLA PRINCIPAL ---
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text("NavControl Driver"),
-        actions: [
-          IconButton(icon: const Icon(Icons.logout), onPressed: () async {
-            final prefs = await SharedPreferences.getInstance();
-            prefs.clear();
-            setState(() {
-               _isConfigured = false;
-               _internalId = null;
-               _identifierController.clear();
-               _tokenController.clear();
-            });
-          })
-        ],
       ),
+    );
+  }
+}
+
+// Pantalla Principal (Dashboard)
+class DashboardScreen extends StatefulWidget {
+  const DashboardScreen({super.key});
+  @override
+  State<DashboardScreen> createState() => _DashboardScreenState();
+}
+
+class _DashboardScreenState extends State<DashboardScreen> {
+  String _nombre = "...";
+  String _matricula = "...";
+  String _codigoReal = "";
+  String _status = "Servicio Activo";
+
+  @override
+  void initState() {
+    super.initState();
+    _loadLocalData();
+    _listenToService();
+  }
+
+  Future<void> _loadLocalData() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _nombre = prefs.getString('vehiculo_nombre') ?? "-";
+      _matricula = prefs.getString('vehiculo_matricula') ?? "-";
+      _codigoReal = prefs.getString('vehiculo_codigo') ?? "";
+    });
+  }
+
+  void _listenToService() {
+    FlutterBackgroundService().on('update').listen((event) {
+      if (event != null && mounted) {
+        setState(() {
+          final time = event['last_update'].toString().split('T')[1].split('.')[0];
+          _status = "Último: $time | Bat: ${event['bat']}%";
+        });
+      }
+    });
+  }
+
+  // Función para enviar alerta antes de cerrar
+  Future<void> _sendClosingAlert() async {
+    final prefs = await SharedPreferences.getInstance();
+    final url = prefs.getString('api_url');
+    final token = prefs.getString('api_token');
+    final id = prefs.getInt('vehiculo_internal_id');
+
+    if (url != null && token != null && id != null) {
+      try {
+        await http.post(
+          Uri.parse('$url/avisos/'),
+          headers: {"Content-Type": "application/json", "Authorization": "Token $token"},
+          body: json.encode({
+            "vehiculo": id,
+            "tipo": "PARADA", // Asegúrate de que este tipo existe en tu modelo Django
+            "mensaje": "⚠️ ALERTA: App cerrada manualmente.",
+            "leido": false
+          }),
+        );
+        debugPrint("🚨 Alerta de cierre enviada.");
+      } catch (e) {
+        debugPrint("Error enviando alerta cierre: $e");
+      }
+    }
+  }
+
+  Future<void> _stopServiceAndLogout() async {
+    // 1. Enviar Alerta
+    await _sendClosingAlert();
+
+    // 2. Parar servicio
+    final service = FlutterBackgroundService();
+    service.invoke("stopService"); 
+    
+    // 3. Borrar sesión
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.clear();
+    
+    if (mounted) {
+      Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => const ConfigScreen()));
+    }
+  }
+
+  void _tryDisableTracking(bool value) {
+    if (!value) {
+      showDialog(context: context, builder: (ctx) => AlertDialog(
+        title: const Text("Código de Seguridad"),
+        content: TextField(
+          decoration: const InputDecoration(hintText: "Introduce código para cerrar"),
+          onSubmitted: (code) {
+             if (code == _codigoReal) {
+               Navigator.pop(ctx);
+               _stopServiceAndLogout(); 
+             } else {
+               Navigator.pop(ctx);
+               ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Código Incorrecto"), backgroundColor: Colors.red));
+             }
+          },
+        ),
+      ));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text("NavControl Driver"), automaticallyImplyLeading: false),
       body: Padding(
-        padding: const EdgeInsets.all(16.0),
+        padding: const EdgeInsets.all(16),
         child: Column(
           children: [
             Card(
-              elevation: 4,
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Column(
-                  children: [
-                    const Icon(Icons.local_shipping, size: 50, color: Colors.blueGrey),
-                    const SizedBox(height: 10),
-                    Text(_nombreVehiculo, style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
-                    Text("Matrícula: $_matricula", style: const TextStyle(fontSize: 18, color: Colors.grey)),
-                    const Divider(),
-                    Text("ID: ${_identifierController.text}", style: const TextStyle(fontWeight: FontWeight.bold)),
-                  ],
-                ),
+              child: ListTile(
+                leading: const Icon(Icons.local_shipping, size: 40),
+                title: Text(_nombre, style: const TextStyle(fontWeight: FontWeight.bold)),
+                subtitle: Text("Matrícula: $_matricula"),
               ),
             ),
             const SizedBox(height: 20),
-            
             Container(
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: _isTracking ? Colors.green.withValues(alpha: 0.1) : Colors.red.withValues(alpha: 0.1),
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: _isTracking ? Colors.green : Colors.red)
-              ),
+              padding: const EdgeInsets.all(15),
+              decoration: BoxDecoration(color: Colors.green[100], borderRadius: BorderRadius.circular(10)),
               child: Row(
                 children: [
-                  Icon(_isTracking ? Icons.gps_fixed : Icons.gps_off, color: _isTracking ? Colors.green : Colors.red),
-                  const SizedBox(width: 10),
-                  Expanded(child: Text(_statusMessage, style: TextStyle(color: _isTracking ? Colors.green[800] : Colors.red[800]))),
+                   const Icon(Icons.sync, color: Colors.green),
+                   const SizedBox(width: 10),
+                   Expanded(child: Text(_status, style: TextStyle(color: Colors.green[900])))
                 ],
               ),
             ),
-            
             const SizedBox(height: 20),
-
             SwitchListTile(
-              title: const Text("Localización Activa"),
-              subtitle: const Text("Requiere código de seguridad"),
-              value: _isTracking,
-              activeTrackColor: Colors.green, 
-              activeThumbColor: Colors.white, 
-              onChanged: _toggleTracking, 
+              title: const Text("Rastreo Activo"),
+              subtitle: const Text("Apagar enviará alerta a central"),
+              value: true, 
+              onChanged: _tryDisableTracking,
+              activeTrackColor: Colors.green,
+              activeThumbColor: Colors.white,
             ),
-            
             const Spacer(),
-            // Mostramos solo parte del Token por seguridad
-            Text("API: ${_apiUrlController.text}", style: const TextStyle(fontSize: 10, color: Colors.grey)),
+            const Text("Cerrar esta pantalla no detiene el GPS.", style: TextStyle(color: Colors.grey, fontStyle: FontStyle.italic)),
           ],
         ),
       ),
