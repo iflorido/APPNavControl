@@ -376,7 +376,13 @@ class DashboardScreen extends StatefulWidget {
 class _DashboardScreenState extends State<DashboardScreen> {
   String _nombre = "...";
   String _matricula = "...";
-  
+  // VARIABLES DE MANTENIMIENTO
+  String _mantenimientoText = "Verificando vehículo...";
+  Color _mantenimientoColor = Colors.grey[200]!;
+  Color _mantenimientoIconColor = Colors.grey;
+  IconData _mantenimientoIcon = Icons.build_circle;
+  bool _hasAlerts = false; // Para saber si llamar la atención visualmente
+
   // Variables de estado visual
   String _statusText = "Iniciando servicio..."; // Cambiado mensaje inicial
   Color _statusColor = Colors.orange[100]!; 
@@ -384,15 +390,91 @@ class _DashboardScreenState extends State<DashboardScreen> {
   IconData _statusIcon = Icons.sync;
   
   // --- LISTA DE LOGS VISUALES ---
-  List<String> _logs = [];
+  final List<String> _logs = [];
 
   @override
   void initState() {
     super.initState();
     _loadLocalData();
+    _checkVehicleHealth();
     _listenToService();
   }
+  Future<void> _checkVehicleHealth() async {
+    final prefs = await SharedPreferences.getInstance();
+    final url = prefs.getString('api_url');
+    final token = prefs.getString('api_token');
+    final id = prefs.getInt('vehiculo_internal_id');
 
+    if (url == null || token == null || id == null) return;
+
+    try {
+      final response = await http.get(
+        Uri.parse('$url/flota/$id/'),
+        headers: {"Content-Type": "application/json", "Authorization": "Token $token"},
+      );
+
+      if (response.statusCode == 200) {
+        final data = json.decode(utf8.decode(response.bodyBytes));
+        
+        // Extraer datos (con valores por defecto si son nulos)
+        double kmActual = (data['kilometraje_total'] ?? 0.0).toDouble();
+        int kmRevision = data['km_proxima_revision'] ?? 15000;
+        String? fechaItvStr = data['fecha_itv']; // Formato YYYY-MM-DD
+        
+        List<String> alertas = [];
+        bool esCritico = false;
+
+        // 1. COMPROBAR KILÓMETROS
+        double kmRestantes = kmRevision - kmActual;
+        
+        if (kmRestantes <= 0) {
+          alertas.add("⚠️ Revisión de Km VENCIDA (hace ${kmRestantes.abs().toInt()} km)");
+          esCritico = true;
+        } else if (kmRestantes < 2000) {
+          alertas.add("⚠️ Revisión en ${kmRestantes.toInt()} km");
+        }
+
+        // 2. COMPROBAR ITV
+        if (fechaItvStr != null) {
+          DateTime itv = DateTime.parse(fechaItvStr);
+          DateTime hoy = DateTime.now();
+          int diasRestantes = itv.difference(hoy).inDays;
+
+          if (diasRestantes < 0) {
+            alertas.add("⛔ ITV CADUCADA (hace ${diasRestantes.abs()} días)");
+            esCritico = true;
+          } else if (diasRestantes <= 30) {
+            alertas.add("📅 ITV caduca en $diasRestantes días");
+          }
+        }
+
+        // 3. ACTUALIZAR UI
+        setState(() {
+          if (alertas.isEmpty) {
+            _mantenimientoText = "Vehículo en buen estado\nITV y Revisiones al día.";
+            _mantenimientoColor = Colors.green[50]!;
+            _mantenimientoIconColor = Colors.green;
+            _mantenimientoIcon = Icons.verified_user;
+            _hasAlerts = false;
+          } else {
+            _mantenimientoText = alertas.join("\n");
+            _hasAlerts = true;
+            if (esCritico) {
+              _mantenimientoColor = Colors.red[100]!;
+              _mantenimientoIconColor = Colors.red;
+              _mantenimientoIcon = Icons.report_problem;
+            } else {
+              _mantenimientoColor = Colors.orange[100]!;
+              _mantenimientoIconColor = Colors.orange[800]!;
+              _mantenimientoIcon = Icons.warning_amber;
+            }
+          }
+        });
+      }
+    } catch (e) {
+      debugPrint("Error checking health: $e");
+    }
+  }
   Future<void> _loadLocalData() async {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
@@ -631,7 +713,50 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       ],
                     ),
                   ),
-                  
+                  const SizedBox(height: 15),
+
+                  // --- NUEVO BLOQUE DE MANTENIMIENTO ---
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(15),
+                    decoration: BoxDecoration(
+                      color: _mantenimientoColor, 
+                      borderRadius: BorderRadius.circular(10),
+                      border: _hasAlerts ? Border.all(color: _mantenimientoIconColor, width: 2) : null,
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start, // Alinear arriba por si hay varias líneas
+                      children: [
+                         Icon(_mantenimientoIcon, color: _mantenimientoIconColor, size: 30),
+                         const SizedBox(width: 15),
+                         Expanded(
+                           child: Column(
+                             crossAxisAlignment: CrossAxisAlignment.start,
+                             children: [
+                               Text(
+                                 _hasAlerts ? "ATENCIÓN REQUERIDA" : "ESTADO DEL VEHÍCULO",
+                                 style: TextStyle(
+                                   color: _mantenimientoIconColor, 
+                                   fontWeight: FontWeight.bold, 
+                                   fontSize: 12
+                                 )
+                               ),
+                               const SizedBox(height: 5),
+                               Text(
+                                 _mantenimientoText, 
+                                 style: const TextStyle(
+                                   color: Colors.black87, 
+                                   fontSize: 15,
+                                   height: 1.2 // Espaciado entre líneas si hay varias alertas
+                                 )
+                               ),
+                             ],
+                           )
+                         )
+                      ],
+                    ),
+                  ),
+                  // -------------------------------------
                   const SizedBox(height: 20),
                   SwitchListTile(
                     title: const Text("Rastreo Activo"),
