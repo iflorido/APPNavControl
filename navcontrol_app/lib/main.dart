@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:ui';
 import 'package:flutter/material.dart';
+import 'package:flutter/cupertino.dart'; 
 import 'package:http/http.dart' as http;
 import 'package:geolocator/geolocator.dart';
 import 'package:battery_plus/battery_plus.dart';
@@ -16,7 +17,7 @@ void main() async {
   runApp(const NavControlApp());
 }
 
-// --- CONFIGURACIÓN DEL SERVICIO ---
+// --- CONFIGURACIÓN DEL SERVICIO (IGUAL) ---
 Future<void> initializeService() async {
   final service = FlutterBackgroundService();
 
@@ -58,7 +59,7 @@ Future<bool> onIosBackground(ServiceInstance service) async {
   return true;
 }
 
-// --- LÓGICA EN SEGUNDO PLANO ---
+// --- LÓGICA EN SEGUNDO PLANO (IGUAL) ---
 @pragma('vm:entry-point')
 void onStart(ServiceInstance service) async {
   DartPluginRegistrant.ensureInitialized();
@@ -76,7 +77,6 @@ void onStart(ServiceInstance service) async {
     service.stopSelf();
   });
 
-  // Configuración inicial
   final prefs = await SharedPreferences.getInstance();
   final String? apiUrl = prefs.getString('api_url');
   final String? token = prefs.getString('api_token');
@@ -96,11 +96,9 @@ void onStart(ServiceInstance service) async {
   
   service.invoke('log', {"msg": "🚀 Servicio iniciado (Cada ${refreshRate}s)"});
   
-  // Variables de estado para el cálculo de velocidad
   Position? lastPosition;
   DateTime? lastTime;
 
-  // Configuración GPS moderna (Soluciona el warning de deprecated)
   const LocationSettings locationSettings = LocationSettings(
     accuracy: LocationAccuracy.high,
     distanceFilter: 0, 
@@ -112,28 +110,21 @@ void onStart(ServiceInstance service) async {
       return; 
     }
 
-    // Obtenemos datos del dispositivo (Batería)
     int batteryLevel = 0;
     try {
        batteryLevel = await Battery().batteryLevel;
     } catch(e) { batteryLevel = -1; }
 
     try {
-      // Aviso de log
       service.invoke('log', {"msg": "🛰️ Obteniendo GPS..."});
       
-      // 1. OBTENER POSICIÓN (UNA SOLA VEZ)
-      // Usamos locationSettings para evitar el warning
       Position position = await Geolocator.getCurrentPosition(locationSettings: locationSettings);
       
-      // --- LÓGICA DE VELOCIDAD MEJORADA ---
       double velocidadFinal = 0.0;
       
-      // A. Preferimos la velocidad nativa del GPS si el coche se mueve (> 1.8 km/h aprox)
       if (position.speed > 0.5) { 
-        velocidadFinal = position.speed * 3.6; // m/s a km/h
+        velocidadFinal = position.speed * 3.6; 
       } 
-      // B. Si el GPS dice 0 pero hay movimiento real (Fallback)
       else if (lastPosition != null && lastTime != null) {
         double distMetros = Geolocator.distanceBetween(
           lastPosition!.latitude, lastPosition!.longitude, 
@@ -144,22 +135,17 @@ void onStart(ServiceInstance service) async {
         
         if (timeDiff > 0) {
           double velocidadCalc = (distMetros / timeDiff) * 3.6;
-          // Filtro: Solo aceptamos si es realista (> 1 km/h y < 200 km/h)
-          // Esto evita saltos locos del GPS estando parado
           if (velocidadCalc > 1 && velocidadCalc < 200) {
               velocidadFinal = velocidadCalc;
           }
         }
       }
 
-      // Actualizamos referencias
       lastPosition = position;
       lastTime = DateTime.now();
 
       service.invoke('log', {"msg": "📡 Enviando datos (Vel: ${velocidadFinal.toInt()} km/h)..."});
 
-      // --- INTENTO DE ENVÍO ---
-      // 1. Historial
       final respHist = await http.post(
         Uri.parse('$apiUrl/historial/'),
         headers: {"Content-Type": "application/json", "Authorization": "Token $token"},
@@ -167,19 +153,17 @@ void onStart(ServiceInstance service) async {
           "vehiculo": internalId,
           "latitud": position.latitude,
           "longitud": position.longitude,
-          "velocidad": velocidadFinal.toInt(), // <--- AQUÍ USAMOS LA VARIABLE QUE CALCULAMOS
+          "velocidad": velocidadFinal.toInt(), 
           "bateria": batteryLevel
         }),
       );
 
-      // 2. Flota (Patch)
       await http.patch(
          Uri.parse('$apiUrl/flota/$internalId/'),
          headers: {"Content-Type": "application/json", "Authorization": "Token $token"},
          body: json.encode({ "ultima_posicion": {"type": "Point", "coordinates": [position.longitude, position.latitude]} })
       );
 
-      // --- ÉXITO ---
       if (service is AndroidServiceInstance) {
         service.setForegroundNotificationInfo(
           title: "NavControl: Conectado 🟢",
@@ -218,7 +202,6 @@ void onStart(ServiceInstance service) async {
   });
 }
 
-
 // --- INTERFAZ UI ---
 class NavControlApp extends StatelessWidget {
   const NavControlApp({super.key});
@@ -226,7 +209,15 @@ class NavControlApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'NavControl Driver',
-      theme: ThemeData(primarySwatch: Colors.blue, useMaterial3: true),
+      debugShowCheckedModeBanner: false, 
+      theme: ThemeData(
+        scaffoldBackgroundColor: const Color(0xFFF2F2F7), 
+        primarySwatch: Colors.blue,
+        useMaterial3: true,
+        fontFamily: Platform.isIOS ? '.SF Pro Text' : null,
+        // CORRECCIÓN 1: Eliminado 'cardTheme' global conflictivo. 
+        // Usaremos estilo manual en _buildIOSCard.
+      ),
       home: const SplashScreen(),
     );
   }
@@ -263,7 +254,10 @@ class _SplashScreenState extends State<SplashScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    return const Scaffold(
+      backgroundColor: Colors.white,
+      body: Center(child: CupertinoActivityIndicator(radius: 20)) 
+    );
   }
 }
 
@@ -305,7 +299,7 @@ class _ConfigScreenState extends State<ConfigScreen> {
                 tiempoRefresco = configResults[0]['tiempo_refresco'];
               }
             }
-          } catch (e) { /* Error silencioso config */ }
+          } catch (e) { }
 
           final prefs = await SharedPreferences.getInstance();
           await prefs.setString('api_url', _apiUrlCtrl.text);
@@ -314,7 +308,6 @@ class _ConfigScreenState extends State<ConfigScreen> {
           await prefs.setInt('vehiculo_internal_id', data['id']);
           await prefs.setString('vehiculo_nombre', data['nombre']);
           await prefs.setString('vehiculo_matricula', data['matricula']);
-          // Guardamos configuración
           await prefs.setInt('refresh_rate', tiempoRefresco);
 
           final service = FlutterBackgroundService();
@@ -343,24 +336,53 @@ class _ConfigScreenState extends State<ConfigScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text("Configuración")),
+      backgroundColor: Colors.white,
+      appBar: AppBar(title: const Text("Configuración"), backgroundColor: Colors.white, elevation: 0),
       body: Padding(
         padding: const EdgeInsets.all(20),
         child: SingleChildScrollView(
           child: Column(
             children: [
-              const Icon(Icons.settings_remote, size: 80, color: Colors.blue),
+              const Icon(Icons.settings_remote, size: 80, color: Color(0xFF007AFF)), 
               const SizedBox(height: 20),
-              TextField(controller: _apiUrlCtrl, decoration: const InputDecoration(labelText: "URL API", border: OutlineInputBorder())),
-              const SizedBox(height: 10),
-              TextField(controller: _tokenCtrl, obscureText: true, decoration: const InputDecoration(labelText: "Token", border: OutlineInputBorder())),
-              const SizedBox(height: 10),
-              TextField(controller: _idCtrl, decoration: const InputDecoration(labelText: "ID Dispositivo", border: OutlineInputBorder())),
-              const SizedBox(height: 20),
-              _isLoading ? const CircularProgressIndicator() : ElevatedButton(onPressed: _saveAndConnect, child: const Text("Guardar y Conectar"))
+              _buildIOSInput(_apiUrlCtrl, "URL API", false),
+              const SizedBox(height: 15),
+              _buildIOSInput(_tokenCtrl, "Token", true),
+              const SizedBox(height: 15),
+              _buildIOSInput(_idCtrl, "ID Dispositivo", false),
+              const SizedBox(height: 30),
+              _isLoading 
+                ? const CupertinoActivityIndicator() 
+                : SizedBox(
+                    width: double.infinity,
+                    height: 50,
+                    child: ElevatedButton(
+                      onPressed: _saveAndConnect, 
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF007AFF),
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))
+                      ),
+                      child: const Text("Guardar y Conectar", style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold))
+                    ),
+                  )
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildIOSInput(TextEditingController ctrl, String label, bool obscure) {
+    return TextField(
+      controller: ctrl,
+      obscureText: obscure,
+      decoration: InputDecoration(
+        labelText: label,
+        filled: true,
+        fillColor: const Color(0xFFF2F2F7),
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
       ),
     );
   }
@@ -376,20 +398,21 @@ class DashboardScreen extends StatefulWidget {
 class _DashboardScreenState extends State<DashboardScreen> {
   String _nombre = "...";
   String _matricula = "...";
-  // VARIABLES DE MANTENIMIENTO
-  String _mantenimientoText = "Verificando vehículo...";
-  Color _mantenimientoColor = Colors.grey[200]!;
+  
+  // MANTENIMIENTO
+  String _mantenimientoText = "Verificando...";
+  // CORRECCIÓN 2: Eliminado _mantenimientoColor porque no se usaba (fondo siempre blanco)
   Color _mantenimientoIconColor = Colors.grey;
   IconData _mantenimientoIcon = Icons.build_circle;
-  bool _hasAlerts = false; // Para saber si llamar la atención visualmente
+  bool _hasAlerts = false; 
 
-  // Variables de estado visual
-  String _statusText = "Iniciando servicio..."; // Cambiado mensaje inicial
-  Color _statusColor = Colors.orange[100]!; 
+  // ESTADO
+  String _statusText = "Iniciando servicio..."; 
+  // CORRECCIÓN 3: Eliminado _statusColor porque no se usaba
   Color _iconColor = Colors.orange;
   IconData _statusIcon = Icons.sync;
   
-  // --- LISTA DE LOGS VISUALES ---
+  // LOGS
   final List<String> _logs = [];
 
   @override
@@ -399,6 +422,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     _checkVehicleHealth();
     _listenToService();
   }
+
   Future<void> _checkVehicleHealth() async {
     final prefs = await SharedPreferences.getInstance();
     final url = prefs.getString('api_url');
@@ -414,67 +438,73 @@ class _DashboardScreenState extends State<DashboardScreen> {
       );
 
       if (response.statusCode == 200) {
-        final data = json.decode(utf8.decode(response.bodyBytes));
+        final bodyString = utf8.decode(response.bodyBytes);
+        final data = json.decode(bodyString);
         
-        // Extraer datos (con valores por defecto si son nulos)
-        double kmActual = (data['kilometraje_total'] ?? 0.0).toDouble();
+        double kmActual = 0.0;
+        if (data['kilometraje_total'] != null) {
+          kmActual = (data['kilometraje_total'] is int) 
+              ? (data['kilometraje_total'] as int).toDouble() 
+              : (data['kilometraje_total'] as double);
+        }
+
         int kmRevision = data['km_proxima_revision'] ?? 15000;
-        String? fechaItvStr = data['fecha_itv']; // Formato YYYY-MM-DD
+        String? fechaItvStr = data['fecha_itv']; 
         
         List<String> alertas = [];
         bool esCritico = false;
 
-        // 1. COMPROBAR KILÓMETROS
         double kmRestantes = kmRevision - kmActual;
         
         if (kmRestantes <= 0) {
-          alertas.add("⚠️ Revisión de Km VENCIDA (hace ${kmRestantes.abs().toInt()} km)");
+          alertas.add("⚠️ Revisión de Km VENCIDA");
           esCritico = true;
         } else if (kmRestantes < 2000) {
           alertas.add("⚠️ Revisión en ${kmRestantes.toInt()} km");
         }
 
-        // 2. COMPROBAR ITV
-        if (fechaItvStr != null) {
+        if (fechaItvStr != null && fechaItvStr != "") {
           DateTime itv = DateTime.parse(fechaItvStr);
           DateTime hoy = DateTime.now();
-          int diasRestantes = itv.difference(hoy).inDays;
+          DateTime hoySoloFecha = DateTime(hoy.year, hoy.month, hoy.day);
+          DateTime itvSoloFecha = DateTime(itv.year, itv.month, itv.day);
+          
+          int diasRestantes = itvSoloFecha.difference(hoySoloFecha).inDays;
 
           if (diasRestantes < 0) {
-            alertas.add("⛔ ITV CADUCADA (hace ${diasRestantes.abs()} días)");
+            alertas.add("⛔ ITV CADUCADA");
             esCritico = true;
           } else if (diasRestantes <= 30) {
             alertas.add("📅 ITV caduca en $diasRestantes días");
           }
         }
 
-        // 3. ACTUALIZAR UI
-        setState(() {
-          if (alertas.isEmpty) {
-            _mantenimientoText = "Vehículo en buen estado\nITV y Revisiones al día.";
-            _mantenimientoColor = Colors.green[50]!;
-            _mantenimientoIconColor = Colors.green;
-            _mantenimientoIcon = Icons.verified_user;
-            _hasAlerts = false;
-          } else {
-            _mantenimientoText = alertas.join("\n");
-            _hasAlerts = true;
-            if (esCritico) {
-              _mantenimientoColor = Colors.red[100]!;
-              _mantenimientoIconColor = Colors.red;
-              _mantenimientoIcon = Icons.report_problem;
+        if (mounted) {
+          setState(() {
+            if (alertas.isEmpty) {
+              _mantenimientoText = "Todo en orden";
+              _mantenimientoIconColor = const Color(0xFF34C759); 
+              _mantenimientoIcon = Icons.verified;
+              _hasAlerts = false;
             } else {
-              _mantenimientoColor = Colors.orange[100]!;
-              _mantenimientoIconColor = Colors.orange[800]!;
-              _mantenimientoIcon = Icons.warning_amber;
+              _mantenimientoText = alertas.join("\n");
+              _hasAlerts = true;
+              if (esCritico) {
+                _mantenimientoIconColor = const Color(0xFFFF3B30); 
+                _mantenimientoIcon = Icons.error;
+              } else {
+                _mantenimientoIconColor = const Color(0xFFFF9500); 
+                _mantenimientoIcon = Icons.warning_amber_rounded;
+              }
             }
-          }
-        });
+          });
+        }
       }
     } catch (e) {
-      debugPrint("Error checking health: $e");
+      debugPrint("❌ Error checking health: $e");
     }
   }
+
   Future<void> _loadLocalData() async {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
@@ -483,11 +513,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
     });
   }
 
-  // --- ESCUCHA DE ESTADO Y LOGS ---
   void _listenToService() {
     final service = FlutterBackgroundService();
     
-    // Escucha de estado general (color y texto grande)
     service.on('update').listen((event) {
       if (event != null && mounted) {
         setState(() {
@@ -499,45 +527,38 @@ class _DashboardScreenState extends State<DashboardScreen> {
           String msg = event['msg'] ?? "";
 
           if (event['status'] == 'error') {
-            _statusColor = Colors.red[100]!;
-            _iconColor = Colors.red;
+            _iconColor = const Color(0xFFFF3B30);
             _statusIcon = Icons.wifi_off;
-            _statusText = "⚠️ ERROR: $msg\nHora: $time | Bat: ${event['bat']}%";
+            _statusText = "Sin conexión\n$msg";
           } else if (event['status'] == 'loading') {
-            _statusColor = Colors.orange[100]!;
-            _iconColor = Colors.orange;
+            _iconColor = const Color(0xFFFF9500);
             _statusIcon = Icons.sync;
-            _statusText = "⏳ $msg";
+            _statusText = "Conectando...\n$msg";
           } else {
-            _statusColor = Colors.green[100]!;
-            _iconColor = Colors.green;
+            _iconColor = const Color(0xFF34C759); 
             _statusIcon = Icons.check_circle;
-            _statusText = "✅ $msg\nÚltimo: $time | Bat: ${event['bat']}%";
+            _statusText = "En línea\nActualizado: $time";
           }
         });
       }
     });
 
-    // Escucha de LOGS detallados
     service.on('log').listen((event) {
       if (event != null && mounted) {
         setState(() {
           String time = DateTime.now().toString().split(' ')[1].split('.')[0];
-          // Añadimos al principio de la lista
           _logs.insert(0, "[$time] ${event['msg']}");
-          // Limitamos a 50 logs para no saturar memoria
           if (_logs.length > 50) _logs.removeLast();
         });
       }
     });
   }
 
-  // --- VALIDACIÓN ONLINE DEL CÓDIGO ---
   Future<void> _verifyAndStop(String inputCode) async {
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (ctx) => const Center(child: CircularProgressIndicator()),
+      builder: (ctx) => const Center(child: CupertinoActivityIndicator()),
     );
 
     final prefs = await SharedPreferences.getInstance();
@@ -616,7 +637,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     showDialog(
       context: context, 
       barrierDismissible: false,
-      builder: (ctx) => const Center(child: CircularProgressIndicator())
+      builder: (ctx) => const Center(child: CupertinoActivityIndicator())
     );
 
     await _sendClosingAlert();
@@ -635,28 +656,34 @@ class _DashboardScreenState extends State<DashboardScreen> {
     if (!value) {
       final codeCtrl = TextEditingController();
       showDialog(context: context, builder: (ctx) => AlertDialog(
-        title: const Text("Código de Seguridad"),
+        backgroundColor: Colors.white,
+        surfaceTintColor: Colors.transparent,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text("Seguridad"),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             const Text("Introduce el código para detener."),
-            const SizedBox(height: 10),
+            const SizedBox(height: 15),
             TextField(
               controller: codeCtrl,
-              // --- CORRECCIÓN 1: TECLADO ALFANUMÉRICO ---
               keyboardType: TextInputType.text, 
-              textCapitalization: TextCapitalization.characters, // Sugerir mayúsculas
+              textCapitalization: TextCapitalization.characters, 
               obscureText: true,
-              decoration: const InputDecoration(hintText: "Código", border: OutlineInputBorder()),
+              decoration: InputDecoration(
+                hintText: "Código", 
+                filled: true,
+                fillColor: const Color(0xFFF2F2F7),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none)
+              ),
             ),
           ],
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Cancelar")),
-          ElevatedButton(
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Cancelar", style: TextStyle(color: Colors.grey))),
+          TextButton(
             onPressed: () => _verifyAndStop(codeCtrl.text),
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
-            child: const Text("Apagar"),
+            child: const Text("Apagar", style: TextStyle(color: Color(0xFFFF3B30), fontWeight: FontWeight.bold)),
           )
         ],
       ));
@@ -672,135 +699,237 @@ class _DashboardScreenState extends State<DashboardScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text("NavControl Driver"), automaticallyImplyLeading: false),
-      body: Column( // Cambiado a Column para dividir la pantalla
+      body: Stack(
         children: [
-          // PARTE SUPERIOR (Tarjetas)
-          Expanded(
-            flex: 2, // Ocupa 2/3 de la pantalla (aprox)
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                children: [
-                  Card(
-                    elevation: 4,
-                    child: ListTile(
-                      leading: const Icon(Icons.local_shipping, size: 40, color: Colors.blue),
-                      title: Text(_nombre, style: const TextStyle(fontWeight: FontWeight.bold)),
-                      subtitle: Text("Matrícula: $_matricula"),
-                    ),
+          // === CAPA 1: CONTENIDO PRINCIPAL ===
+          SafeArea(
+            child: Column(
+              children: [
+                // 1. HEADER (Logo y Nombre)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 10, 20, 20),
+                  child: Row(
+                    children: [
+                      // LOGO APP 
+                      Container(
+                        width: 45, height: 45,
+                        decoration: BoxDecoration(
+                          color: Colors.blueAccent,
+                          borderRadius: BorderRadius.circular(12),
+                          // CORRECCIÓN 4: withOpacity -> withValues
+                          boxShadow: [BoxShadow(color: Colors.blue.withValues(alpha: 0.3), blurRadius: 10, offset: const Offset(0, 4))]
+                        ),
+                        child: const Icon(Icons.navigation, color: Colors.white), 
+                      ),
+                      const SizedBox(width: 15),
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: const [
+                          Text("NavControl", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.black87)),
+                          Text("Driver Assistant", style: TextStyle(fontSize: 14, color: Colors.grey)),
+                        ],
+                      )
+                    ],
                   ),
-                  const SizedBox(height: 20),
-                  
-                  AnimatedContainer(
-                    duration: const Duration(milliseconds: 500),
-                    padding: const EdgeInsets.all(15),
-                    decoration: BoxDecoration(
-                      color: _statusColor, 
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: _iconColor, width: 2)
-                    ),
-                    child: Row(
-                      children: [
-                         Icon(_statusIcon, color: _iconColor, size: 30),
-                         const SizedBox(width: 15),
-                         Expanded(
-                           child: Text(
-                             _statusText, 
-                             style: const TextStyle(color: Colors.black87, fontWeight: FontWeight.bold, fontSize: 16)
-                           )
-                         )
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 15),
+                ),
 
-                  // --- NUEVO BLOQUE DE MANTENIMIENTO ---
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(15),
-                    decoration: BoxDecoration(
-                      color: _mantenimientoColor, 
-                      borderRadius: BorderRadius.circular(10),
-                      border: _hasAlerts ? Border.all(color: _mantenimientoIconColor, width: 2) : null,
-                    ),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start, // Alinear arriba por si hay varias líneas
+                // 2. CONTENIDO SCROLLABLE (Tarjetas)
+                Expanded(
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.symmetric(horizontal: 20),
+                    child: Column(
                       children: [
-                         Icon(_mantenimientoIcon, color: _mantenimientoIconColor, size: 30),
-                         const SizedBox(width: 15),
-                         Expanded(
-                           child: Column(
-                             crossAxisAlignment: CrossAxisAlignment.start,
-                             children: [
-                               Text(
-                                 _hasAlerts ? "ATENCIÓN REQUERIDA" : "ESTADO DEL VEHÍCULO",
-                                 style: TextStyle(
-                                   color: _mantenimientoIconColor, 
-                                   fontWeight: FontWeight.bold, 
-                                   fontSize: 12
-                                 )
-                               ),
-                               const SizedBox(height: 5),
-                               Text(
-                                 _mantenimientoText, 
-                                 style: const TextStyle(
-                                   color: Colors.black87, 
-                                   fontSize: 15,
-                                   height: 1.2 // Espaciado entre líneas si hay varias alertas
-                                 )
-                               ),
-                             ],
-                           )
-                         )
+                        // TARJETA DE VEHÍCULO
+                        _buildIOSCard(
+                          child: Column(
+                            children: [
+                              Row(
+                                children: [
+                                  Container(
+                                    padding: const EdgeInsets.all(12),
+                                    decoration: BoxDecoration(color: const Color(0xFFF2F2F7), borderRadius: BorderRadius.circular(15)),
+                                    child: const Icon(Icons.directions_car_filled, color: Color(0xFF007AFF), size: 32),
+                                  ),
+                                  const SizedBox(width: 15),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text(_nombre, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+                                        const SizedBox(height: 4),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                          decoration: BoxDecoration(color: Colors.grey[200], borderRadius: BorderRadius.circular(6)),
+                                          child: Text(_matricula, style: TextStyle(fontSize: 13, color: Colors.grey[800], fontWeight: FontWeight.w600, letterSpacing: 1)),
+                                        )
+                                      ],
+                                    ),
+                                  )
+                                ],
+                              ),
+                            ],
+                          )
+                        ),
+                        const SizedBox(height: 15),
+
+                        // FILA DOBLE: ESTADO Y MANTENIMIENTO
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Expanded(
+                              child: _buildIOSCard(
+                                padding: 15,
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Icon(_statusIcon, color: _iconColor, size: 28),
+                                    const SizedBox(height: 10),
+                                    Text("Conexión", style: TextStyle(fontSize: 13, color: Colors.grey[500], fontWeight: FontWeight.w600)),
+                                    const SizedBox(height: 4),
+                                    Text(_statusText, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, height: 1.2)),
+                                  ],
+                                )
+                              ),
+                            ),
+                            const SizedBox(width: 15),
+                            Expanded(
+                              child: _buildIOSCard(
+                                padding: 15,
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                      children: [
+                                        Icon(_mantenimientoIcon, color: _mantenimientoIconColor, size: 28),
+                                        if (_hasAlerts) 
+                                          Container(width: 8, height: 8, decoration: const BoxDecoration(color: Color(0xFFFF3B30), shape: BoxShape.circle))
+                                      ],
+                                    ),
+                                    const SizedBox(height: 10),
+                                    Text("Salud", style: TextStyle(fontSize: 13, color: Colors.grey[500], fontWeight: FontWeight.w600)),
+                                    const SizedBox(height: 4),
+                                    Text(_mantenimientoText, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, height: 1.2), maxLines: 4, overflow: TextOverflow.ellipsis),
+                                  ],
+                                )
+                              ),
+                            ),
+                          ],
+                        ),
+                        
+                        const SizedBox(height: 15),
+
+                        // BOTÓN DE RASTREO
+                        _buildIOSCard(
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: const [
+                                  Text("Rastreo GPS", style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                                  Text("Activo en segundo plano", style: TextStyle(fontSize: 13, color: Colors.grey)),
+                                ],
+                              ),
+                              Transform.scale(
+                                scale: 0.9,
+                                child: CupertinoSwitch(
+                                  value: true, 
+                                  onChanged: _tryDisableTracking,
+                                  activeColor: const Color(0xFF34C759),
+                                ),
+                              )
+                            ],
+                          )
+                        ),
+                        const SizedBox(height: 100), 
                       ],
                     ),
                   ),
-                  // -------------------------------------
-                  const SizedBox(height: 20),
-                  SwitchListTile(
-                    title: const Text("Rastreo Activo"),
-                    subtitle: const Text("Apagar enviará alerta a central"),
-                    value: true, 
-                    onChanged: _tryDisableTracking,
-                    activeTrackColor: Colors.green,
-                    activeThumbColor: Colors.white,
-                  ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
-          
-          // PARTE INFERIOR (Log de Consola)
-          // --- MEJORA 2: PANEL DE INFORMACIÓN DE CONEXIÓN ---
-          const Divider(height: 1),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            color: Colors.grey[100],
-            child: const Text("Log de Conexión (Diagnóstico)", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
-          ),
-          Expanded(
-            flex: 1, // Ocupa el espacio restante
-            child: Container(
-              color: Colors.black87,
-              child: ListView.builder(
-                padding: const EdgeInsets.all(10),
-                itemCount: _logs.length,
-                itemBuilder: (context, index) {
-                  return Padding(
-                    padding: const EdgeInsets.only(bottom: 4),
-                    child: Text(
-                      _logs[index],
-                      style: const TextStyle(color: Colors.greenAccent, fontFamily: 'Courier', fontSize: 12),
+
+          // === CAPA 2: PANEL DESLIZABLE DE LOGS ===
+          DraggableScrollableSheet(
+            initialChildSize: 0.08,
+            minChildSize: 0.08,
+            maxChildSize: 0.6,
+            builder: (BuildContext context, ScrollController scrollController) {
+              return Container(
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: const BorderRadius.vertical(top: Radius.circular(30)),
+                  // CORRECCIÓN 4: withOpacity -> withValues
+                  boxShadow: [
+                    BoxShadow(color: Colors.black.withValues(alpha: 0.1), blurRadius: 20, offset: const Offset(0, -5))
+                  ]
+                ),
+                child: Column(
+                  children: [
+                    const SizedBox(height: 12),
+                    Container(
+                      width: 40, height: 5,
+                      decoration: BoxDecoration(color: Colors.grey[300], borderRadius: BorderRadius.circular(10)),
                     ),
-                  );
-                },
-              ),
-            ),
+                    const SizedBox(height: 15),
+                    
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 20),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.terminal, size: 18, color: Colors.grey),
+                          const SizedBox(width: 8),
+                          Text("Diagnóstico en tiempo real", style: TextStyle(color: Colors.grey[600], fontWeight: FontWeight.bold, fontSize: 13)),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+
+                    Expanded(
+                      child: Container(
+                        color: const Color(0xFF1C1C1E), 
+                        child: ListView.builder(
+                          controller: scrollController, 
+                          padding: const EdgeInsets.all(15),
+                          itemCount: _logs.length,
+                          itemBuilder: (context, index) {
+                            return Padding(
+                              padding: const EdgeInsets.only(bottom: 6),
+                              child: Text(
+                                _logs[index],
+                                style: const TextStyle(color: Color(0xFF34C759), fontFamily: 'Courier', fontSize: 12),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
           ),
         ],
       ),
+    );
+  }
+
+  Widget _buildIOSCard({required Widget child, double padding = 20}) {
+    return Container(
+      width: double.infinity,
+      padding: EdgeInsets.all(padding),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(24),
+        // CORRECCIÓN 4: withOpacity -> withValues
+        boxShadow: [
+          BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 15, offset: const Offset(0, 5)),
+          BoxShadow(color: Colors.black.withValues(alpha: 0.02), blurRadius: 3, offset: const Offset(0, 1)),
+        ]
+      ),
+      child: child,
     );
   }
 }
